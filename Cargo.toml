@@ -1,0 +1,31 @@
+[package]
+name = "rust-stream-vis"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+bevy = { version = "0.12.0", features = ["dynamic_linking"] }
+tokio = { version = "1", features = ["full"] }
+rand = "0.8.4"
+crossbeam-channel = "0.5.0"
+bevy_tweening = "0.9.0"
+chrono = "0.4.33"
+#futures-util = {path = "../futures-rs/futures-util/"}
+futures-util = "0.3.30"
+log = "0.4.20"
+env_logger = "0.11.2"
+glam = "0.24.2"
+tempfile = "3.10.1"
+argh = "0.1.12"
+image = "0.24.9"
+
+# Enable a small amount of optimization in debug mode
+[profile.dev]
+opt-level = 1
+
+# Enable high optimizations for dependencies (incl. Bevy), but not for our code:
+[profile.dev.package."*"]
+opt-level = 3
+
