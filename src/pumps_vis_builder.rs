@@ -4,12 +4,13 @@ use bevy::render::color::Color;
 use crossbeam_channel::{bounded, Receiver, Sender};
 use futures_util::{
     future::BoxFuture,
-    stream::{self, BoxStream, StreamExt},
+    stream::{self, StreamExt},
 };
+use pumps::{Concurrency, Pipeline};
 
 use crate::{
-    stream_vis::{
-        BufferBlock, BufferUnrderedBlock, FilterBlock, SinkBlock, SourceBlock, StreamBlock,
+    pumps_vis::{
+        FilterBlock, MapOrderedBlock, MapUnorderedBlock, SinkBlock, SourceBlock, StreamBlock,
     },
     FilteredOutEvent, StreamUpdate, StreamedUnit, UnitAdvanceBlockEvent, UnitCreatedEvent,
     UnitValueKind, UnitValueUpdateEvent,
@@ -22,14 +23,16 @@ const COLORS: [Color; 4] = [
     Color::rgb(0.26, 0.46, 0.42),
 ];
 
-pub struct StreamVisBuilder {
-    stream: BoxStream<'static, StreamedUnit>,
+pub struct PumpsVisBuilder {
+    // stream: BoxStream<'static, StreamedUnit>,
+    pipeline: Pipeline<StreamedUnit>,
     blocks: Vec<StreamBlock>,
     tx: Sender<StreamUpdate>,
     rx: Receiver<StreamUpdate>,
+    rt: tokio::runtime::Runtime,
 }
 
-impl StreamVisBuilder {
+impl PumpsVisBuilder {
     pub fn source(size: usize) -> Self {
         let (tx, rx) = bounded::<StreamUpdate>(100);
 
@@ -48,11 +51,20 @@ impl StreamVisBuilder {
             StreamedUnit { id, block_id: 0 }
         });
 
-        StreamVisBuilder {
-            stream: tick_stream.boxed(),
+        let rt = tokio::runtime::Runtime::new().unwrap();
+
+        let pipeline = {
+            let _g = rt.enter();
+            Pipeline::from_stream(tick_stream)
+        };
+
+        PumpsVisBuilder {
+            // stream: tick_stream.boxed(),
+            pipeline,
             blocks: vec![StreamBlock::Source(SourceBlock { id: 0 })],
             tx,
             rx,
+            rt,
         }
     }
 
@@ -60,24 +72,20 @@ impl StreamVisBuilder {
         let id = self.blocks.len() as u32 + 1;
 
         let color = COLORS[(id as usize) % COLORS.len()];
-
         let max_duration = *timings.iter().max().unwrap();
 
-        let stream = self
-            .stream
-            .filter_map(updating_filter(
-                id,
-                self.tx.clone(),
-                timings,
-                filter_ratio,
-                color,
-            ))
-            .boxed();
+        let f = updating_filter(id, self.tx.clone(), timings, filter_ratio, color);
 
-        StreamVisBuilder {
-            stream,
+        let pipeline = {
+            let _g = self.rt.enter();
+            self.pipeline.filter_map(f, Concurrency::serial())
+        };
+
+        PumpsVisBuilder {
+            pipeline,
             tx: self.tx,
             rx: self.rx,
+            rt: self.rt,
             blocks: self
                 .blocks
                 .into_iter()
@@ -93,28 +101,33 @@ impl StreamVisBuilder {
         self,
         timings: Vec<Duration>,
         buffered: usize,
-        max_duration: Duration,
+        ui_duration: Duration,
     ) -> Self {
         let map_id = self.blocks.len() as u32 + 1;
         let color = COLORS[(map_id as usize) % COLORS.len()];
 
-        let stream = self
-            .stream
-            .map(update_stream_state(self.tx.clone(), timings, map_id, color))
-            .buffered(buffered)
-            .boxed();
+        let pipeline = {
+            let _g = self.rt.enter();
+            self.pipeline
+                .map(
+                    update_stream_state(self.tx.clone(), timings, map_id, color),
+                    Concurrency::concurrent_ordered(buffered),
+                )
+                .backpressure(3)
+        };
 
-        StreamVisBuilder {
-            stream,
+        PumpsVisBuilder {
+            pipeline,
             tx: self.tx,
             rx: self.rx,
+            rt: self.rt,
             blocks: self
                 .blocks
                 .into_iter()
-                .chain(vec![StreamBlock::MapBuffer(BufferBlock {
+                .chain(vec![StreamBlock::MapBuffer(MapOrderedBlock {
                     id: map_id,
-                    duration: max_duration,
-                    buffered,
+                    duration: ui_duration,
+                    concurrency: buffered,
                     units: Default::default(),
                 })])
                 .collect(),
@@ -127,21 +140,24 @@ impl StreamVisBuilder {
 
         let max_duration = *timings.iter().max().unwrap();
 
-        let stream = self
-            .stream
-            .map(update_stream_state(self.tx.clone(), timings, map_id, color))
-            .buffer_unordered(buffered)
-            .boxed();
+        let pipeline = {
+            let _g = self.rt.enter();
+            self.pipeline.map(
+                update_stream_state(self.tx.clone(), timings, map_id, color),
+                Concurrency::concurrent_unordered(buffered),
+            )
+        };
 
-        StreamVisBuilder {
-            stream,
+        PumpsVisBuilder {
+            pipeline,
             tx: self.tx,
             rx: self.rx,
+            rt: self.rt,
             blocks: self
                 .blocks
                 .into_iter()
                 .chain(vec![StreamBlock::MapBufferUnordered(
-                    BufferUnrderedBlock::new(
+                    MapUnorderedBlock::new(
                         map_id,
                         buffered * 3, // TODO: fix this
                         max_duration,
@@ -156,10 +172,10 @@ impl StreamVisBuilder {
         let sink_id = (self.blocks.len() + 1) as u32;
 
         std::thread::spawn(move || {
-            let rt = tokio::runtime::Runtime::new().unwrap();
-            let mut stream = self.stream;
-            rt.block_on(async move {
-                while let Some(unit) = stream.next().await {
+            let (mut reciever, _join_handle) = self.pipeline.build();
+
+            self.rt.block_on(async move {
+                while let Some(unit) = reciever.recv().await {
                     log::debug!("sink received unit({})", unit.id);
                     self.tx
                         .send(StreamUpdate::AdvanceBlock(UnitAdvanceBlockEvent {
@@ -204,7 +220,6 @@ fn updating_filter(
 
         log::debug!("creating filter future for unit({})", unit.id);
         let duration = timings[unit.id as usize];
-
         Box::pin(async move {
             log::debug!("calling filter future for unit({})", unit.id);
             let unit_id = unit.id;
@@ -275,6 +290,7 @@ async fn updating_future(
 
 fn update_stream_state(
     tx: Sender<StreamUpdate>,
+    // duration: JitteringDuration,
     timings: Vec<Duration>,
     phase2: u32,
     color: Color,

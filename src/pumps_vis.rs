@@ -12,31 +12,32 @@ use bevy_tweening::{
 
 use crate::{
     future_vis::{spawn_unit, StreamUnit, UnitBackground, UnitFutureProgress, UnitStroke},
+    stream_vis::{crecent_mesh, dashed_line, NUMBER_FONT_COLOR, SECTION_HEIGHT, TEXT_MARGIN},
     StreamEvent, StreamUpdate, UnitValueKind,
 };
 
 #[derive(Component, Default, Clone)]
-pub struct BufferBlock {
+pub struct MapOrderedBlock {
     pub id: u32,
     pub duration: Duration,
-    pub buffered: usize,
+    pub concurrency: usize,
     pub units: VecDeque<u32>,
 }
 
 #[derive(Component, Default, Clone)]
-pub struct BufferUnrderedBlock {
+pub struct MapUnorderedBlock {
     pub id: u32,
     pub duration: Duration,
-    pub buffered: usize,
+    pub concurrency: usize,
     pub slots: VecDeque<Option<u32>>,
 }
 
-impl BufferUnrderedBlock {
+impl MapUnorderedBlock {
     pub fn new(id: u32, size: usize, duration: Duration, buffered: usize) -> Self {
         Self {
             id,
             duration,
-            buffered,
+            concurrency: buffered,
             slots: vec![None; size].into_iter().collect(),
         }
     }
@@ -61,8 +62,8 @@ pub struct SinkBlock {
 #[derive(Component, Clone)]
 pub enum StreamBlock {
     Source(SourceBlock),
-    MapBuffer(BufferBlock),
-    MapBufferUnordered(BufferUnrderedBlock),
+    MapBuffer(MapOrderedBlock),
+    MapBufferUnordered(MapUnorderedBlock),
     FilterBlock(FilterBlock),
     Sink(SinkBlock),
 }
@@ -82,9 +83,9 @@ impl StreamBlock {
 const BLOCK_PADDING: f32 = 5.;
 const SECTION_MARGIN: f32 = 80.;
 pub const BG_COLOR: Color = Color::rgb(34. / 255.0, 39. / 255.0, 46. / 255.0);
+const BLOCK_Y_TRANSFORM: f32 = 20.;
 
 const UNIT_SIZE: f32 = 15.;
-pub const SECTION_HEIGHT: f32 = 150.;
 
 // buffer
 const BUFFER_WIDTH: f32 = 10. * UNIT_SIZE + BLOCK_PADDING * 2.;
@@ -107,88 +108,9 @@ const SOURCE_COLOR: Color = Color::rgb(0.73, 0.71, 0.78);
 
 // text
 const FONT_SIZE: f32 = 16.;
-pub const NUMBER_FONT_COLOR: Color = Color::rgb(0.99, 0.84, 0.41);
-pub const TEXT_MARGIN: f32 = 60.;
-
-pub fn dashed_line(len: f32, segment_len: f32, segment_width: f32) -> Mesh {
-    let segments_count = (len as usize) / (segment_len as usize);
-
-    let mut positions = Vec::new();
-    let mut normals = Vec::new();
-    let mut uvs = Vec::new();
-
-    let mut indices = Vec::new();
-
-    for i in (0..segments_count).step_by(2) {
-        let x = 0.;
-        let y = i as f32 * segment_len - len / 2.;
-
-        positions.push([x, y, 0.]);
-        normals.push([0., 0., 1.]);
-        uvs.push([0., 0.]);
-
-        positions.push([x, y + segment_len, 0.]);
-        normals.push([0., 0., 1.]);
-        uvs.push([0., 0.]);
-
-        positions.push([x + segment_width, y + segment_len, 0.]);
-        normals.push([0., 0., 1.]);
-        uvs.push([0., 0.]);
-
-        positions.push([x + segment_width, y, 0.]);
-        normals.push([0., 0., 1.]);
-        uvs.push([0., 0.]);
-
-        indices.extend_from_slice(&[
-            (0 + i * 2) as u32,
-            (1 + i * 2) as u32,
-            (2 + i * 2) as u32,
-            (0 + i * 2) as u32,
-            (2 + i * 2) as u32,
-            (3 + i * 2) as u32,
-        ]);
-    }
-
-    Mesh::new(PrimitiveTopology::TriangleList)
-        .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, positions)
-        .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, normals)
-        .with_inserted_attribute(Mesh::ATTRIBUTE_UV_0, uvs)
-        .with_indices(Some(Indices::U32(indices)))
-}
-
-pub fn crecent_mesh(sides: usize, radius: f32) -> Mesh {
-    let mut positions = Vec::with_capacity(sides);
-    let mut normals = Vec::with_capacity(sides);
-    let mut uvs = Vec::with_capacity(sides);
-
-    let step = std::f32::consts::TAU / sides as f32;
-    for i in 0..sides {
-        let theta = std::f32::consts::FRAC_PI_2 - i as f32 * step;
-        let (sin, cos) = theta.sin_cos();
-
-        positions.push([cos * radius, sin * radius, 0.0]);
-        normals.push([0.0, 0.0, 1.0]);
-        uvs.push([0.5 * (cos + 1.0), 1.0 - 0.5 * (sin + 1.0)]);
-    }
-
-    let mut indices = Vec::with_capacity((sides - 2) * 3);
-    for i in 1..(sides as u32 - 20) {
-        indices.extend_from_slice(&[0, i + 1, i]);
-    }
-
-    for i in (sides as u32 + 20)..(sides as u32 - 1) {
-        indices.extend_from_slice(&[0, i + 1, i]);
-    }
-
-    Mesh::new(PrimitiveTopology::TriangleList)
-        .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, positions)
-        .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, normals)
-        .with_inserted_attribute(Mesh::ATTRIBUTE_UV_0, uvs)
-        .with_indices(Some(Indices::U32(indices)))
-}
 
 fn spawn_buffered(
-    buffer_block: BufferBlock,
+    buffer_block: MapOrderedBlock,
     transform: Transform,
     commands: &mut Commands,
     meshes: &mut ResMut<Assets<Mesh>>,
@@ -223,7 +145,7 @@ fn spawn_buffered(
                         },
                     ),
                     TextSection::new(
-                        "ms)",
+                        "ms, ",
                         TextStyle {
                             font_size: FONT_SIZE,
                             color: Color::WHITE,
@@ -231,7 +153,7 @@ fn spawn_buffered(
                         },
                     ),
                     TextSection::new(
-                        "\n.buffer(".to_string(),
+                        "\n  concurrent_ordered(".to_string(),
                         TextStyle {
                             font_size: FONT_SIZE,
                             color: Color::WHITE,
@@ -239,7 +161,7 @@ fn spawn_buffered(
                         },
                     ),
                     TextSection::new(
-                        buffer_block.buffered.to_string(),
+                        buffer_block.concurrency.to_string(),
                         TextStyle {
                             font_size: FONT_SIZE,
                             color: NUMBER_FONT_COLOR,
@@ -247,7 +169,7 @@ fn spawn_buffered(
                         },
                     ),
                     TextSection::new(
-                        ")".to_string(),
+                        "))".to_string(),
                         TextStyle {
                             font_size: FONT_SIZE,
                             color: Color::WHITE,
@@ -274,13 +196,14 @@ fn spawn_buffered(
                     )
                     .into(),
                 material: materials.add(ColorMaterial::from(BUFFER_COLOR)),
+                transform: Transform::from_translation(Vec3::new(0., BLOCK_Y_TRANSFORM, 0.)),
                 ..default()
             });
         });
 }
 
 fn spawn_buffer_unordered(
-    block: BufferUnrderedBlock,
+    block: MapUnorderedBlock,
     transform: Transform,
     commands: &mut Commands,
     meshes: &mut ResMut<Assets<Mesh>>,
@@ -314,7 +237,7 @@ fn spawn_buffer_unordered(
                         },
                     ),
                     TextSection::new(
-                        "ms)",
+                        "ms, ",
                         TextStyle {
                             font_size: FONT_SIZE,
                             color: Color::WHITE,
@@ -322,7 +245,7 @@ fn spawn_buffer_unordered(
                         },
                     ),
                     TextSection::new(
-                        "\n.buffered_unordered(".to_string(),
+                        "\n  concurrent_unordered(".to_string(),
                         TextStyle {
                             font_size: FONT_SIZE,
                             color: Color::WHITE,
@@ -330,7 +253,7 @@ fn spawn_buffer_unordered(
                         },
                     ),
                     TextSection::new(
-                        block.buffered.to_string(),
+                        block.concurrency.to_string(),
                         TextStyle {
                             font_size: FONT_SIZE,
                             color: NUMBER_FONT_COLOR,
@@ -338,7 +261,7 @@ fn spawn_buffer_unordered(
                         },
                     ),
                     TextSection::new(
-                        ")".to_string(),
+                        "))".to_string(),
                         TextStyle {
                             font_size: FONT_SIZE,
                             color: Color::WHITE,
@@ -365,6 +288,7 @@ fn spawn_buffer_unordered(
                     )
                     .into(),
                 material: materials.add(ColorMaterial::from(BUFFER_UNORDERED_COLOR)),
+                transform: Transform::from_translation(Vec3::new(0., BLOCK_Y_TRANSFORM, 0.)),
                 ..default()
             });
         });
@@ -432,7 +356,7 @@ fn spawn_filter(
                     )
                     .into(),
                 material: materials.add(ColorMaterial::from(FILTER_COLOR)),
-                transform: Transform::from_translation(Vec3::new(0., 0., 0.)),
+                transform: Transform::from_translation(Vec3::new(0., BLOCK_Y_TRANSFORM, 0.)),
                 ..default()
             });
         });
@@ -524,7 +448,17 @@ pub fn spawn_blocks(
     for (i, block) in blocks.into_iter().enumerate() {
         match block {
             StreamBlock::Source(block) => {
-                spawn_source(block, transform, commands, meshes, materials);
+                spawn_source(
+                    block,
+                    transform.with_translation(Vec3::new(
+                        transform.translation.x,
+                        BLOCK_Y_TRANSFORM,
+                        100.,
+                    )),
+                    commands,
+                    meshes,
+                    materials,
+                );
 
                 transform.translation += Vec3::new(SECTION_MARGIN, 0., 0.);
                 // spawn_divider(transform, commands, meshes, materials);
@@ -578,7 +512,11 @@ pub fn spawn_blocks(
             }
             StreamBlock::Sink(block) => {
                 transform.translation += Vec3::new(SECTION_MARGIN, 0., 0.);
-
+                let transform = transform.with_translation(Vec3::new(
+                    transform.translation.x,
+                    BLOCK_Y_TRANSFORM,
+                    100.,
+                ));
                 spawn_sink(block, transform, commands, meshes, materials);
             }
         }
@@ -783,7 +721,7 @@ pub fn advance_units(
                             ),
                             end: Vec3::new(
                                 block_transform.translation.x + FILTER_WIDTH / 2.,
-                                block_transform.translation.y,
+                                block_transform.translation.y + BLOCK_Y_TRANSFORM,
                                 10.,
                             ),
                         },
@@ -839,7 +777,7 @@ pub fn advance_units(
                     let pos_in_block = i as i64;
 
                     let x = block_br_x - (pos_in_block as f32) * (UNIT_SIZE + 5.);
-                    let y = block_br_y;
+                    let y = block_br_y + BLOCK_Y_TRANSFORM;
 
                     let tween = Tween::new(
                         EaseFunction::ExponentialOut,

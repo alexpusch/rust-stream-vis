@@ -20,6 +20,8 @@ glam = "0.24.2"
 tempfile = "3.10.1"
 argh = "0.1.12"
 image = "0.24.9"
+# pumps = "0.0.1"
+pumps = { path = "../pumps_rs/"} 
 
 # Enable a small amount of optimization in debug mode
 [profile.dev]
